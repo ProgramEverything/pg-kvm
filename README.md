@@ -7,6 +7,14 @@ hardware IP-KVM but still have machines to babysit.)*
 
 **English** | [中文](#中文说明)
 
+## Hardware requirements
+
+That's all the hardware you need - no dedicated KVM switch, no extra server:
+
+- 📷 A **UVC video capture card** (HDMI-to-USB, the cheap kind works fine)
+- 🔲 An **ESP32-S3 development board**
+- 📱 An **Android phone**
+
 ---
 
 ## Use case
@@ -133,6 +141,14 @@ Star - it helps others discover the project and keeps development going. Thank y
 # 中文说明
 
 *(**pg** 即 **poor guys** - 懂的都懂)*
+
+## 硬件要求
+
+所需的全部硬件就这些 - 无需专用 KVM 切换器,无需额外服务器:
+
+- 📷 一只 **UVC 视频采集卡**(HDMI 转 USB,便宜的即可)
+- 🔲 一块 **ESP32-S3 开发板**
+- 📱 一台 **安卓手机**
 
 ## 使用场景
 
