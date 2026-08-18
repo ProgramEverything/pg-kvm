@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- ===== Camera ===== -->
+  <string name="select_camera">Select Camera</string>
+  <string name="no_camera_detected">No camera detected</string>
+  <string name="no_usb_camera_hint">No USB camera detected\nPlease plug in a UVC camera</string>
+
+  <!-- ===== Preview / stream toggles ===== -->
+  <string name="pause_preview">Pause Preview</string>
+  <string name="resume_preview">Resume Preview</string>
+  <string name="pause_stream">Pause Stream</string>
+  <string name="resume_stream">Resume Stream</string>
+
+  <!-- ===== Device info panel ===== -->
+  <string name="device_info">Device Info</string>
+  <string name="resolution">Resolution</string>
+  <string name="switch_label">Switch ▾</string>
+  <string name="frame_rate">Frame Rate</string>
+  <string name="stream_info">Stream Info</string>
+  <string name="codec">Codec</string>
+  <string name="server_address">Server</string>
+  <string name="connected_clients">Clients: %1$d</string>
+
+  <!-- ===== Resolution dialog ===== -->
+  <string name="select_resolution">Select Resolution</string>
+  <string name="resolution_list_error">Failed to load resolutions\nMake sure a camera is connected and capturing</string>
+  <string name="current">Current</string>
+  <string name="cancel">Cancel</string>
+
+  <!-- ===== BLE panel / dialog ===== -->
+  <string name="ble_connect">Connect</string>
+  <string name="ble_disconnect">Disconnect</string>
+  <string name="ble_input_clients">Inputs: %1$d</string>
+  <string name="ble_select_device">Select Device</string>
+  <string name="ble_scanning">Scanning…</string>
+  <string name="ble_rescan">Rescan</string>
+  <string name="ble_scanning_hint">Scanning for devices…\nPlease select \"KBBridge-ESP32S3\"</string>
+  <string name="ble_no_devices">No devices found\nMake sure the ESP32-S3 is powered on and in range</string>
+
+  <!-- ===== BLE connection status (set by BleConnection / SessionManager) ===== -->
+  <string name="ble_status_disconnected">Not connected</string>
+  <string name="ble_status_connecting">Connecting…</string>
+  <string name="ble_status_connect_rejected">Connection refused</string>
+  <string name="ble_status_discovering">Discovering services…</string>
+  <string name="ble_status_discover_failed">Service discovery failed</string>
+  <string name="ble_status_service_not_found">Service not found</string>
+  <string name="ble_status_char_not_found">Characteristic not found</string>
+  <string name="ble_status_disconnected_unexpected">Disconnected</string>
+  <string name="ble_status_connected">Connected: %1$s</string>
+</resources>

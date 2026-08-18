@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     Copyright 2023 Stream.IO, Inc. All Rights Reserved.
+
+     Licensed under the Apache License, Version 2.0 (the "License");
+     you may not use this file except in compliance with the License.
+     You may obtain a copy of the License at
+
+          http://www.apache.org/licenses/LICENSE-2.0
+
+     Unless required by applicable law or agreed to in writing, software
+     distributed under the License is distributed on an "AS IS" BASIS,
+     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+     See the License for the specific language governing permissions and
+     limitations under the License.
+-->
+<resources>
+  <string name="app_name">PG-KVM</string>
+
+  <string name="session_offline">Offline</string>
+  <string name="session_impossible">Second peer is missing</string>
+  <string name="session_ready">Ready to start session</string>
+  <string name="session_creating">Creating session</string>
+  <string name="session_active">Session Active</string>
+
+  <string name="button_start_session">Start session</string>
+  <string name="button_join_session">Join session</string>
+
+  <string name="button_end_session">End Session</string>
+
+  <!-- ===== 摄像头 ===== -->
+  <string name="select_camera">选择摄像头</string>
+  <string name="no_camera_detected">未检测到摄像头</string>
+  <string name="no_usb_camera_hint">未检测到 USB 摄像头\n请插入 UVC 摄像头</string>
+
+  <!-- ===== 预览/串流开关 ===== -->
+  <string name="pause_preview">暂停预览</string>
+  <string name="resume_preview">恢复预览</string>
+  <string name="pause_stream">暂停串流</string>
+  <string name="resume_stream">恢复串流</string>
+
+  <!-- ===== 设备信息面板 ===== -->
+  <string name="device_info">设备信息</string>
+  <string name="resolution">分辨率</string>
+  <string name="switch_label">切换 ▾</string>
+  <string name="frame_rate">帧率</string>
+  <string name="stream_info">串流信息</string>
+  <string name="codec">编码格式</string>
+  <string name="server_address">服务器地址</string>
+  <string name="connected_clients">已连接客户端: %1$d</string>
+
+  <!-- ===== 分辨率对话框 ===== -->
+  <string name="select_resolution">选择分辨率</string>
+  <string name="resolution_list_error">无法获取分辨率列表\n请确保摄像头已连接并开始采集</string>
+  <string name="current">当前</string>
+  <string name="cancel">取消</string>
+
+  <!-- ===== BLE 面板/对话框 ===== -->
+  <string name="ble_connect">连接设备</string>
+  <string name="ble_disconnect">断开</string>
+  <string name="ble_input_clients">输入客户端: %1$d</string>
+  <string name="ble_select_device">选择蓝牙设备</string>
+  <string name="ble_scanning">扫描中…</string>
+  <string name="ble_rescan">重新扫描</string>
+  <string name="ble_scanning_hint">正在扫描蓝牙设备…\n请选择 \"KBBridge-ESP32S3\" 设备</string>
+  <string name="ble_no_devices">未发现蓝牙设备\n请确保 ESP32-S3 已上电且在范围内</string>
+
+  <!-- ===== BLE 连接状态（由 BleConnection / SessionManager 设置） ===== -->
+  <string name="ble_status_disconnected">未连接</string>
+  <string name="ble_status_connecting">连接中…</string>
+  <string name="ble_status_connect_rejected">连接被拒绝</string>
+  <string name="ble_status_discovering">发现服务中…</string>
+  <string name="ble_status_discover_failed">服务发现失败</string>
+  <string name="ble_status_service_not_found">未找到目标服务</string>
+  <string name="ble_status_char_not_found">未找到目标特征</string>
+  <string name="ble_status_disconnected_unexpected">已断开</string>
+  <string name="ble_status_connected">已连接: %1$s</string>
+</resources>
