@@ -108,8 +108,8 @@ download, compile, and flash it yourself. See
 2. **Android app**: open `pg-kvm-android/` in Android Studio and run it on your phone. Attach a
    UVC capture card / webcam via USB-OTG.
 3. **Pair**: in the app, connect to the `KBBridge-ESP32S3` BLE device.
-4. **Control**: open the served web page (or the `frontend/` app) in any browser on the same
-   network, and start working on the remote PC.
+4. **Control**: open the web page served by the app running on the phone in any browser on the
+   same network, and start working on the remote PC.
 
 ## Acknowledgements
 
@@ -236,7 +236,8 @@ ESP32-S3 端运行 KoStard 的开源固件
 2. **Android 应用**:用 Android Studio 打开 `pg-kvm-android/` 并运行到手机,通过 USB-OTG
    接入 UVC 采集卡或摄像头;
 3. **配对**:在应用中连接 `KBBridge-ESP32S3` BLE 设备;
-4. **控制**:在同一网络的任意浏览器中打开网页(或 `frontend/` 应用),即可开始操作远程电脑。
+4. **控制**:在同一网络的任意浏览器中打开由运行在手机上的服务器提供的网页,即可开始操作
+   远程电脑。
 
 ## 致谢
 
