@@ -83,7 +83,8 @@ class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
 
-    PermissionUtils.requestPermissions(this, arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO), 0)
+    PermissionUtils.init(this)
+    PermissionUtils.requestCameraPermission(this)
 
     sessionManager = WebRtcSessionManagerImpl(
       context = this,
@@ -130,8 +131,11 @@ fun StreamingScreen() {
   val sessionManager = LocalWebRtcSessionManager.current
   val scope = rememberCoroutineScope()
 
-  LaunchedEffect(key1 = Unit) {
-    sessionManager.onSessionScreenReady()
+  val isCameraPermissionGranted by PermissionUtils.isCameraPermissionGranted.collectAsState()
+  LaunchedEffect(isCameraPermissionGranted) {
+    if (isCameraPermissionGranted) {
+      sessionManager.onSessionScreenReady()
+    }
   }
 
   val cameraList by sessionManager.cameraList.collectAsState()
@@ -673,17 +677,26 @@ fun BleConnectionPanel(
   onDisconnectClick: () -> Unit
 ) {
   val context = LocalContext.current
-  val activity = context as Activity
+  val activity = context as ComponentActivity
   // 状态灯与文案比较需使用当前语言的资源值（状态文本由 BleConnection 本地化生成）
   val scanningText = stringResource(R.string.ble_scanning)
   val connectingText = stringResource(R.string.ble_status_connecting)
+
+  var isWaitingBTPermission by remember{ mutableStateOf(false) }
+  val isBTPermissionGranted by PermissionUtils.isBTPermissionGranted.collectAsState()
+  LaunchedEffect(isBTPermissionGranted) {
+    if (isBTPermissionGranted && isWaitingBTPermission) {
+      onConnectClick()
+    }
+  }
 
   // 点击"连接设备"时先检查蓝牙权限
   fun onConnectButtonClick() {
     if (PermissionUtils.arePermissionsGranted(context, PermissionUtils.BLE_PERMISSIONS)) {
       onConnectClick()
     } else {
-      PermissionUtils.requestPermissions(activity, PermissionUtils.BLE_PERMISSIONS, MainActivity.BLE_REQUEST_CODE)
+      PermissionUtils.requestBTPermission(activity)
+      isWaitingBTPermission = true
     }
   }
 

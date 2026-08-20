@@ -47,4 +47,7 @@
   <string name="ble_status_char_not_found">Characteristic not found</string>
   <string name="ble_status_disconnected_unexpected">Disconnected</string>
   <string name="ble_status_connected">Connected: %1$s</string>
+
+  <string name="need_camera_permission">Camera permission is required</string>
+  <string name="need_ble_permission">Bluetooth permission is required</string>
 </resources>

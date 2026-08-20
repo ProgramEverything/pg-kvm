@@ -75,4 +75,7 @@
   <string name="ble_status_char_not_found">未找到目标特征</string>
   <string name="ble_status_disconnected_unexpected">已断开</string>
   <string name="ble_status_connected">已连接: %1$s</string>
+
+  <string name="need_camera_permission">需要摄像头权限</string>
+  <string name="need_ble_permission">需要蓝牙权限</string>
 </resources>
