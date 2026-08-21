@@ -67,7 +67,7 @@ void ConvertPipeline::updateConvFunc() {
 			mFrameConvFunc = uvc_any2rgbx;
 			break;
 		case PIXEL_FORMAT_YUV20SP:
-			LOGI("PIXEL_FORMAT_YUV20SP:");
+			LOGI("PIXEL_FORMAT_YUV420SP:");
 			mFrameConvFunc = uvc_any2yuv420SP;
 			break;
 		case PIXEL_FORMAT_NV21:

@@ -281,8 +281,8 @@ void UVCPreview::callbackPixelFormatChanged() {
 		mFrameCallbackFunc = uvc_any2rgbx;
 		callbackPixelBytes = sz * 4;
 		break;
-	  case PIXEL_FORMAT_YUV20SP:
-		LOGI("PIXEL_FORMAT_YUV20SP:");
+	  case PIXEL_FORMAT_YUV420SP:
+		LOGI("PIXEL_FORMAT_YUV420SP:");
 		mFrameCallbackFunc = uvc_yuyv2iyuv420SP;
 		callbackPixelBytes = (sz * 3) / 2;
 		break;
@@ -291,6 +291,11 @@ void UVCPreview::callbackPixelFormatChanged() {
 		mFrameCallbackFunc = uvc_yuyv2yuv420SP;
 		callbackPixelBytes = (sz * 3) / 2;
 		break;
+      case PIXEL_FORMAT_I420:
+          LOGI("PIXEL_FORMAT_I420");
+          mFrameCallbackFunc = uvc_yuyv2yuv420P;
+          callbackPixelBytes = (sz * 3) / 2;
+          break;
 	}
 }
 

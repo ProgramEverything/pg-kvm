@@ -25,8 +25,8 @@ import java.util.List;
  * 非 GLES 方案的 VideoCapturer：使用 UVCCamera 的 setPreviewDisplay + setFrameCallback
  * 来采集 USB 摄像头画面，转为 I420 后送入 WebRTC 管线。
  *
- * setPreviewDisplay 用于显式本地预览（低延迟），setFrameCallback 获取 NV21 buffer
- * 转换为 I420 后通过 capturerObserver.onFrameCaptured 送入 WebRTC。
+ * setPreviewDisplay 用于显式本地预览（低延迟），setFrameCallback 获取 I420 buffer
+ * 直接包装为 JavaI420Buffer 后通过 capturerObserver.onFrameCaptured 送入 WebRTC。
  *
  * 不使用 SurfaceTextureHelper / OpenGL。
  */
@@ -256,8 +256,8 @@ public class UvcCameraVideoCapture implements VideoCapturer {
       uvcCamera.setPreviewDisplay(previewSurface);
     }
 
-    // 4. 设置帧回调 —— PIXEL_FORMAT_YUV420SP(=4) 在本 fork 实际产 NV21
-    uvcCamera.setFrameCallback(frameCallback, UVCCamera.PIXEL_FORMAT_YUV420SP);
+    // 4. 设置帧回调 -- I420 平面格式，与 onFrame 的 Y/U/V 三平面解析对应
+    uvcCamera.setFrameCallback(frameCallback, UVCCamera.PIXEL_FORMAT_I420);
 
     // 5. 自动对焦/白平衡
     uvcCamera.setAutoFocus(true);
@@ -294,13 +294,13 @@ public class UvcCameraVideoCapture implements VideoCapturer {
       uvcCamera.setPreviewDisplay(previewSurface);
     }
     // 3. 恢复帧回调
-    uvcCamera.setFrameCallback(frameCallback, UVCCamera.PIXEL_FORMAT_YUV420SP);
+    uvcCamera.setFrameCallback(frameCallback, UVCCamera.PIXEL_FORMAT_I420);
     // 4. 启动预览
     uvcCamera.startPreview();
     uvcCamera.updateCameraParams();
   }
 
-  // ==================== 帧回调：NV21 → I420 → WebRTC ====================
+  // ==================== 帧回调：I420 -> WebRTC ====================
 
   private final IFrameCallback frameCallback = new IFrameCallback() {
     @Override
@@ -317,59 +317,36 @@ public class UvcCameraVideoCapture implements VideoCapturer {
         return;
       }
 
-      frame.position(0);
 
       // 分配 I420 buffer
-      JavaI420Buffer i420 = JavaI420Buffer.allocate(w, h);
+      frame.position(0);
+      ByteBuffer yPlane = frame.slice();
+      yPlane.limit(w * h);
 
-      try {
-        // Y 平面：直接拷贝 w*h 字节
-        ByteBuffer dstY = i420.getDataY();
-        int strideY = i420.getStrideY();
-        ByteBuffer dstU = i420.getDataU();
-        int strideU = i420.getStrideU();
-        ByteBuffer dstV = i420.getDataV();
-        int strideV = i420.getStrideV();
+      frame.position(w * h);
+      ByteBuffer uPlane = frame.slice();
+      uPlane.limit(w * h / 4);
 
-        // 拷贝 Y 平面（逐行，考虑 stride）
-        copyPlane(frame, dstY, w, h, w, strideY);
+      frame.position(w * h * 5 / 4);
+      ByteBuffer vPlane = frame.slice();
+      vPlane.limit(w * h / 4);
 
-        // NV21 chroma 在 Y 平面之后：VU 交错，每对 (V, U) 对应 2x2 像素块
-        int chromaOffset = w * h;
-        int uvWidth = w / 2;
-        int uvHeight = h / 2;
+      JavaI420Buffer i420 = JavaI420Buffer.wrap(
+        w,
+        h,
+        yPlane,
+        w,
+        uPlane,
+        w / 2,
+        vPlane,
+        w / 2,
+        null
+      );
 
-        // 拆分 NV21 的 VU 交错到 I420 的 U 和 V 平面
-        byte[] chromaRow = new byte[w]; // 一整行 chroma 的缓冲区
-        for (int row = 0; row < uvHeight; row++) {
-          int chromaRowStart = chromaOffset + row * w; // NV21 chroma 行起始
-          frame.position(chromaRowStart);
-
-          // 读一行 chroma
-          for (int col = 0; col < w; col += 2) {
-            int idx = col / 2;
-            byte v = frame.get(); // V
-            byte u = frame.get(); // U
-            // 写入 I420 U/V 平面
-            int uvRowOffset = row * strideU + idx;
-            if (uvRowOffset < dstU.capacity()) {
-              dstU.put(uvRowOffset, u);
-            }
-            if (uvRowOffset < dstV.capacity()) {
-              dstV.put(uvRowOffset, v);
-            }
-          }
-        }
-
-        // 封装 VideoFrame 送入 WebRTC
-        long timestampNs = System.nanoTime();
-        VideoFrame videoFrame = new VideoFrame(i420, rotation, timestampNs);
-        capturerObserver.onFrameCaptured(videoFrame);
-      } catch (Exception e) {
-        Log.e(TAG, "onFrame error", e);
-      } finally {
-        i420.release();
-      }
+      long timestampNs = System.nanoTime();
+      VideoFrame videoFrame = new VideoFrame(i420, rotation, timestampNs);
+      capturerObserver.onFrameCaptured(videoFrame);
+      videoFrame.release();
     }
   };
 

@@ -107,7 +107,7 @@ void CallbackPipeline::callbackPixelFormatChanged(const uint32_t &width, const u
 		callbackPixelBytes = sz * 4;
 		break;
 	  case PIXEL_FORMAT_YUV20SP:
-		LOGI("PIXEL_FORMAT_YUV20SP:");
+		LOGI("PIXEL_FORMAT_YUV420SP:");
 		mFrameCallbackFunc = uvc_any2yuv420SP;
 		callbackPixelBytes = (sz * 3) / 2;
 		break;
