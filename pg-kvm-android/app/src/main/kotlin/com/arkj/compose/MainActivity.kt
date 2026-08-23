@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -39,6 +40,7 @@ import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
+import androidx.compose.material.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -55,6 +57,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -65,12 +70,16 @@ import com.arkj.compose.stream.SignalingServer
 import com.arkj.compose.stream.input.BleHelper
 import com.arkj.compose.stream.peer.StreamPeerConnectionFactory
 import com.arkj.compose.stream.sessions.LocalWebRtcSessionManager
+import com.arkj.compose.stream.sessions.ServerPorts
+import com.arkj.compose.stream.sessions.StreamService
 import com.arkj.compose.stream.sessions.WebRtcSessionManager
 import com.arkj.compose.stream.sessions.WebRtcSessionManagerImpl
 import com.arkj.compose.ui.theme.Primary
 import com.arkj.compose.ui.theme.WebrtcSampleComposeTheme
 import com.arkj.compose.utils.PermissionUtils
 import io.getstream.webrtc.sample.compose.R
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -130,6 +139,42 @@ class MainActivity : ComponentActivity() {
 fun StreamingScreen() {
   val sessionManager = LocalWebRtcSessionManager.current
   val scope = rememberCoroutineScope()
+  val context = LocalContext.current
+
+  // 服务启动/重启结果 -> Toast
+  LaunchedEffect(Unit) {
+    sessionManager.serverStartEvents.collect { event ->
+      if (event.failures.isEmpty()) {
+        if (event.isRestart) {
+          Toast.makeText(context, context.getString(R.string.servers_restarted), Toast.LENGTH_SHORT).show()
+        }
+      } else {
+        val failedTemplate = context.getString(
+          if (event.isRestart) R.string.service_restart_failed else R.string.service_start_failed
+        )
+        event.failures.forEach { service ->
+          val name = context.getString(
+            when (service) {
+              StreamService.HTTP -> R.string.service_http
+              StreamService.SIGNALING -> R.string.service_signaling
+              StreamService.RELAY -> R.string.service_relay
+            }
+          )
+          Toast.makeText(context, failedTemplate.format(name), Toast.LENGTH_SHORT).show()
+        }
+      }
+    }
+  }
+
+  // 服务器设置对话框
+  var showServerSettingsDialog by remember { mutableStateOf(false) }
+
+  /** 重启三个服务（含端口变更后的重启），在后台线程执行避免阻塞 UI */
+  fun restartServers() {
+    scope.launch(Dispatchers.Default) {
+      sessionManager.restartStreamServer()
+    }
+  }
 
   val isCameraPermissionGranted by PermissionUtils.isCameraPermissionGranted.collectAsState()
   LaunchedEffect(isCameraPermissionGranted) {
@@ -181,7 +226,9 @@ fun StreamingScreen() {
       currentCamera = currentCamera,
       onCameraSelected = { cameraId ->
         sessionManager.switchCamera(cameraId)
-      }
+      },
+      onRestartServers = { restartServers() },
+      onOpenSettings = { showServerSettingsDialog = true }
     )
 
     Spacer(modifier = Modifier.height(4.dp))
@@ -366,28 +413,44 @@ fun StreamingScreen() {
       )
     }
 
+    // ===== 服务器设置对话框 =====
+    if (showServerSettingsDialog) {
+      ServerSettingsDialog(
+        currentPorts = sessionManager.getServerPorts(),
+        onConfirm = { ports ->
+          showServerSettingsDialog = false
+          scope.launch(Dispatchers.Default) {
+            sessionManager.updateServerPorts(ports.httpPort, ports.signalingPort, ports.relayPort)
+          }
+        },
+        onDismiss = { showServerSettingsDialog = false }
+      )
+    }
+
     Spacer(modifier = Modifier.height(12.dp))
   }
 }
 
 /**
- * 顶部 Header，包含摄像头选择下拉按钮
+ * 顶部 Header，包含摄像头选择下拉按钮和右上角"更多"菜单
  */
 @Composable
 fun CameraHeader(
   cameraList: List<CameraDeviceInfo>,
   currentCamera: CameraDeviceInfo?,
-  onCameraSelected: (String) -> Unit
+  onCameraSelected: (String) -> Unit,
+  onRestartServers: () -> Unit = {},
+  onOpenSettings: () -> Unit = {}
 ) {
   var expanded by remember { mutableStateOf(false) }
+  var menuExpanded by remember { mutableStateOf(false) }
 
   Row(
     modifier = Modifier
       .fillMaxWidth()
       .background(Primary)
       .padding(horizontal = 16.dp, vertical = 12.dp),
-    verticalAlignment = Alignment.CenterVertically,
-    horizontalArrangement = Arrangement.Start
+    verticalAlignment = Alignment.CenterVertically
   ) {
     // 摄像头选择按钮
     Box {
@@ -427,7 +490,9 @@ fun CameraHeader(
             onClick = { expanded = false },
             enabled = false
           ) {
-            Text(stringResource(R.string.no_camera_detected))
+            Text(text = stringResource(R.string.no_camera_detected),
+              fontWeight = FontWeight.Normal,
+              color = Color.Black)
           }
         } else {
           cameraList.forEach { camera ->
@@ -444,6 +509,47 @@ fun CameraHeader(
               )
             }
           }
+        }
+      }
+    }
+
+    Spacer(modifier = Modifier.weight(1f))
+
+    // 右上角"更多"展开菜单
+    Box {
+      Text(
+        text = "⋮",
+        color = Color.White,
+        fontSize = 22.sp,
+        modifier = Modifier
+          .clip(RoundedCornerShape(8.dp))
+          .clickable { menuExpanded = true }
+          .padding(horizontal = 10.dp, vertical = 2.dp)
+      )
+
+      DropdownMenu(
+        expanded = menuExpanded,
+        onDismissRequest = { menuExpanded = false }
+      ) {
+        DropdownMenuItem(
+          onClick = {
+            menuExpanded = false
+            onRestartServers()
+          }
+        ) {
+          Text(text = stringResource(R.string.menu_restart_server),
+            fontWeight = FontWeight.Normal,
+            color = Color.Black)
+        }
+        DropdownMenuItem(
+          onClick = {
+            menuExpanded = false
+            onOpenSettings()
+          }
+        ) {
+          Text(text = stringResource(R.string.menu_settings),
+            fontWeight = FontWeight.Normal,
+            color = Color.Black)
         }
       }
     }
@@ -908,4 +1014,113 @@ fun BleDeviceDialog(
   )
 }
 
+/**
+ * 服务器设置对话框：配置 HTTP / 信令 / 中继三个服务的监听端口。
+ * 确认后端口持久化；若服务正在运行会用新端口自动重启。
+ */
+@Composable
+fun ServerSettingsDialog(
+  currentPorts: ServerPorts,
+  onConfirm: (ServerPorts) -> Unit,
+  onDismiss: () -> Unit
+) {
+  var httpPort by remember { mutableStateOf(TextFieldValue(currentPorts.httpPort.toString())) }
+  var signalingPort by remember { mutableStateOf(TextFieldValue(currentPorts.signalingPort.toString())) }
+  var relayPort by remember { mutableStateOf(TextFieldValue(currentPorts.relayPort.toString())) }
+  var errorText by remember { mutableStateOf<String?>(null) }
+  val invalidPortText = stringResource(R.string.invalid_port)
+  val portConflictText = stringResource(R.string.port_conflict)
 
+  fun validPort(text: String): Int? =
+    text.trim().toIntOrNull()?.takeIf { it in 1..65535 }
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = {
+      Text(
+        text = stringResource(R.string.server_settings),
+        fontSize = 18.sp,
+        fontWeight = FontWeight.Bold
+      )
+    },
+    text = {
+      Column {
+        PortField(
+          label = stringResource(R.string.http_port),
+          value = httpPort,
+          onValueChange = { httpPort = it }
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        PortField(
+          label = stringResource(R.string.signaling_port),
+          value = signalingPort,
+          onValueChange = { signalingPort = it }
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        PortField(
+          label = stringResource(R.string.relay_port),
+          value = relayPort,
+          onValueChange = { relayPort = it }
+        )
+        if (errorText != null) {
+          Spacer(modifier = Modifier.height(8.dp))
+          Text(
+            text = errorText ?: "",
+            fontSize = 13.sp,
+            color = Color(0xFFE53935)
+          )
+        }
+      }
+    },
+    confirmButton = {
+      TextButton(
+        onClick = {
+          val http = validPort(httpPort.text)
+          val signaling = validPort(signalingPort.text)
+          val relay = validPort(relayPort.text)
+          when {
+            http == null || signaling == null || relay == null ->
+              errorText = invalidPortText
+            setOf(http, signaling, relay).size != 3 ->
+              errorText = portConflictText
+            else ->
+              onConfirm(ServerPorts(http, signaling, relay))
+          }
+        }
+      ) {
+        Text(stringResource(R.string.confirm), color = Primary)
+      }
+    },
+    dismissButton = {
+      TextButton(onClick = onDismiss) {
+        Text(stringResource(R.string.cancel), color = Color.Gray)
+      }
+    }
+  )
+}
+
+@Composable
+private fun PortField(
+  label: String,
+  value: TextFieldValue,
+  onValueChange: (TextFieldValue) -> Unit
+) {
+  Column {
+    Text(
+      text = label,
+      fontSize = 13.sp,
+      color = Color.Gray
+    )
+    Spacer(modifier = Modifier.height(4.dp))
+    TextField(
+      value = value,
+      onValueChange = { input ->
+        // 只允许数字
+        onValueChange(TextFieldValue(input.text.filter { it.isDigit() }.take(5)))
+      },
+      singleLine = true,
+      keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+      modifier = Modifier.fillMaxWidth()
+    )
+  }
+}

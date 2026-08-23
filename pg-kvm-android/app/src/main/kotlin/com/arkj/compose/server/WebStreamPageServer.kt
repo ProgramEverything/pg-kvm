@@ -20,6 +20,8 @@ object WebStreamPageServer {
    * @return 服务器访问 URL
    */
   fun start(context: Context, port: Int = 8080): String {
+    // 防重入：若已有实例在运行，先停掉释放端口
+    stop()
     serverPort = port
 
     server = AndServer.webServer(context)

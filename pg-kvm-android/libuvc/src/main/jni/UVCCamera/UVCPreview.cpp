@@ -43,7 +43,7 @@
 #include "libuvc_internal.h"
 
 #define	LOCAL_DEBUG 0
-#define MAX_FRAME 4
+#define MAX_FRAME 8
 #define PREVIEW_PIXEL_BYTES 4	// RGBA/RGBX
 #define FRAME_POOL_SZ MAX_FRAME + 2
 
@@ -148,6 +148,7 @@ uvc_frame_t *UVCPreview::get_frame(size_t data_bytes) {
 				break;
 			}
 		}
+        LOGW("Frame pool size: %d", mFramePool.size());
 		if (!frame && !mFramePool.isEmpty()) {
 			// 没有容量足够的帧：丢弃池尾的小帧，给即将分配的新帧腾出池位，
 			// 避免池被无用小帧占满后陷入"分配-释放"循环

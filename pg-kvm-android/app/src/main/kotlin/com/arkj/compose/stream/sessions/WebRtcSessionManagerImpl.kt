@@ -41,7 +41,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.webrtc.AudioTrack
@@ -78,7 +80,15 @@ class WebRtcSessionManagerImpl(
     /** BLE 意外断开后的自动重连间隔与最大尝试次数 */
     private const val BLE_RECONNECT_DELAY_MS = 2000L
     private const val BLE_MAX_RECONNECT_ATTEMPTS = 3
-    private const val INPUT_RELAY_SERVER_PORT = 3001
+
+    /** 服务端口默认值与持久化键 */
+    private const val SERVER_PREFS = "stream_server_prefs"
+    private const val KEY_HTTP_PORT = "http_port"
+    private const val KEY_SIGNALING_PORT = "signaling_port"
+    private const val KEY_RELAY_PORT = "relay_port"
+    private const val DEFAULT_HTTP_PORT = 8080
+    private const val DEFAULT_SIGNALING_PORT = 3000
+    private const val DEFAULT_RELAY_PORT = 3001
   }
 
   // ===== 全局唯一对象 =====
@@ -86,6 +96,20 @@ class WebRtcSessionManagerImpl(
   private val bleHelper = BleHelper(context)
   private val pairingStore = BlePairingStore(context)
   private val relayServer = InputRelayServer { activeSession()?.bleConnection }
+
+  // ===== 服务器端口配置（SharedPreferences 持久化） =====
+
+  private val serverPrefs = context.getSharedPreferences(SERVER_PREFS, Context.MODE_PRIVATE)
+  private var httpPort: Int = serverPrefs.getInt(KEY_HTTP_PORT, DEFAULT_HTTP_PORT)
+  private var signalingPort: Int = serverPrefs.getInt(KEY_SIGNALING_PORT, DEFAULT_SIGNALING_PORT)
+  private var relayPort: Int = serverPrefs.getInt(KEY_RELAY_PORT, DEFAULT_RELAY_PORT)
+
+  /** 服务启动/重启结果事件（供 UI 弹 Toast） */
+  private val _serverStartEvents = MutableSharedFlow<ServerStartEvent>(extraBufferCapacity = 8)
+  override val serverStartEvents: SharedFlow<ServerStartEvent> = _serverStartEvents
+
+  /** 客户端地址列表收集任务（重启信令服务器时取消重建，避免重复收集） */
+  private var clientAddressesJob: Job? = null
 
   private val uvcCameraHelper by lazy {
     UvcCameraHelper(context).also(::setupUsbListeners)
@@ -201,7 +225,9 @@ class WebRtcSessionManagerImpl(
     // 注入 Web API 控制器（供前端侧边卡片查询/控制）
     DeviceApiController.Companion.sessionManager = this
 
-    startStreamServer()
+    // 启动串流服务器（start 现在会阻塞等待端口绑定，放到后台协程执行；
+    // 启动失败会通过 serverStartEvents 事件流通知 UI）
+    sessionManagerScope.launch { startStreamServer() }
   }
 
   override fun switchCamera(cameraId: String) {
@@ -357,31 +383,76 @@ class WebRtcSessionManagerImpl(
       return
     }
 
-    try {
-      // 启动 HTTP 服务器
-      val httpUrl = WebStreamPageServer.start(context = context, port = 8080)
-      logger.i { "[startStreaming] HTTP server started at $httpUrl" }
+    val failures = startAllStreamServices()
+    // 只要有服务启动成功就视为运行中（失败的服务可通过"重启服务器"恢复）
+    isStreamServerRunning = failures.size < StreamService.values().size
 
-      // 启动 WebSocket 信令服务器
-      startSignalingServer()
-
-      // 启动输入中继服务器 (端口 3001)
-      relayServer.start(INPUT_RELAY_SERVER_PORT)
-      logger.i { "[startStreaming] Input relay server started" }
-
-      isStreamServerRunning = true
+    if (failures.isEmpty()) {
       _streamInfo.value = _streamInfo.value.copy(
         isStreaming = true,
-        serverUrl = httpUrl,
+        serverUrl = WebStreamPageServer.getServerUrl() ?: "",
         codec = "VP8"  // 默认编码格式
       )
-    } catch (e: Exception) {
-      logger.e { "[startStreaming] failed: ${e.message}" }
-      // 回滚
-      try { WebStreamPageServer.stop() } catch (_: Exception) {}
-      try { signalingServer.stop() } catch (_: Exception) {}
-      throw e
     }
+    _serverStartEvents.tryEmit(ServerStartEvent(failures, isRestart = false))
+  }
+
+  override fun restartStreamServer() {
+    logger.i { "[restartStreamServer] restarting all stream servers" }
+
+    // 停止全部三个服务（忽略停止异常）
+    try { signalingServer.stop() } catch (e: Exception) { logger.w { "[restartStreamServer] signaling stop: ${e.message}" } }
+    try { relayServer.stop() } catch (e: Exception) { logger.w { "[restartStreamServer] relay stop: ${e.message}" } }
+    try { WebStreamPageServer.stop() } catch (e: Exception) { logger.w { "[restartStreamServer] http stop: ${e.message}" } }
+    isStreamServerRunning = false
+
+    // 等待端口彻底释放（stop 已带超时 join，这里只是兜底）
+    try { Thread.sleep(200) } catch (_: InterruptedException) {}
+
+    val failures = startAllStreamServices()
+    isStreamServerRunning = failures.size < StreamService.values().size
+
+    if (failures.isEmpty()) {
+      _streamInfo.value = _streamInfo.value.copy(
+        isStreaming = true,
+        serverUrl = WebStreamPageServer.getServerUrl() ?: "",
+        codec = _streamInfo.value.codec.ifEmpty { "VP8" }
+      )
+    }
+    _serverStartEvents.tryEmit(ServerStartEvent(failures, isRestart = true))
+  }
+
+  /** 逐个启动三个服务，返回启动失败的服务列表 */
+  private fun startAllStreamServices(): List<StreamService> {
+    val failures = mutableListOf<StreamService>()
+
+    // HTTP 页面服务器
+    try {
+      val httpUrl = WebStreamPageServer.start(context = context, port = httpPort)
+      logger.i { "[startStreaming] HTTP server started at $httpUrl" }
+    } catch (e: Exception) {
+      logger.e { "[startStreaming] HTTP server failed: ${e.message}" }
+      failures += StreamService.HTTP
+    }
+
+    // WebSocket 信令服务器
+    try {
+      startSignalingServer()
+    } catch (e: Exception) {
+      logger.e { "[startStreaming] signaling server failed: ${e.message}" }
+      failures += StreamService.SIGNALING
+    }
+
+    // 输入中继服务器
+    try {
+      relayServer.start(relayPort)
+      logger.i { "[startStreaming] Input relay server started" }
+    } catch (e: Exception) {
+      logger.e { "[startStreaming] input relay server failed: ${e.message}" }
+      failures += StreamService.RELAY
+    }
+
+    return failures
   }
 
   override fun stopStreamServer() {
@@ -396,6 +467,12 @@ class WebRtcSessionManagerImpl(
     } catch (e: Exception) {
       logger.e { "[stopStreaming] signaling server stop failed: ${e.message}" }
     }
+    try { relayServer.stop() } catch (e: Exception) {
+      logger.e { "[stopStreaming] relay server stop failed: ${e.message}" }
+    }
+    try { WebStreamPageServer.stop() } catch (e: Exception) {
+      logger.e { "[stopStreaming] http server stop failed: ${e.message}" }
+    }
 
     isStreamServerRunning = false
     _streamInfo.value = _streamInfo.value.copy(
@@ -404,6 +481,25 @@ class WebRtcSessionManagerImpl(
       codec = "N/A",
       clientAddresses = emptyList()
     )
+  }
+
+  override fun getServerPorts(): ServerPorts = ServerPorts(httpPort, signalingPort, relayPort)
+
+  override fun updateServerPorts(httpPort: Int, signalingPort: Int, relayPort: Int) {
+    serverPrefs.edit()
+      .putInt(KEY_HTTP_PORT, httpPort)
+      .putInt(KEY_SIGNALING_PORT, signalingPort)
+      .putInt(KEY_RELAY_PORT, relayPort)
+      .apply()
+    this.httpPort = httpPort
+    this.signalingPort = signalingPort
+    this.relayPort = relayPort
+    logger.i { "[updateServerPorts] ports updated: http=$httpPort, signaling=$signalingPort, relay=$relayPort" }
+
+    // 服务运行中则用新端口重启
+    if (isStreamServerRunning) {
+      restartStreamServer()
+    }
   }
 
   // ==================== 会话管理（核心） ====================
@@ -603,13 +699,15 @@ class WebRtcSessionManagerImpl(
 
   /**
    * 启动信令服务器并开始监听客户端连接
+   * @throws java.io.IOException 端口绑定失败
    */
   private fun startSignalingServer() {
-    val wsUrl = signalingServer.start()
+    val wsUrl = signalingServer.start(signalingPort)
     logger.i { "[startSignalingServer] signaling server started at $wsUrl" }
 
-    // 观察客户端地址变化
-    sessionManagerScope.launch {
+    // 观察客户端地址变化（重启时取消旧收集任务，避免重复收集）
+    clientAddressesJob?.cancel()
+    clientAddressesJob = sessionManagerScope.launch {
       signalingServer.clientAddresses.collect { addresses ->
         _streamInfo.value = _streamInfo.value.copy(clientAddresses = addresses)
       }

@@ -78,4 +78,22 @@
 
   <string name="need_camera_permission">需要摄像头权限</string>
   <string name="need_ble_permission">需要蓝牙权限</string>
+
+  <!-- ===== 服务器菜单/设置 ===== -->
+  <string name="menu_restart_server">重启服务器</string>
+  <string name="menu_settings">设置</string>
+  <string name="service_http">HTTP 服务器</string>
+  <string name="service_signaling">信令服务器</string>
+  <string name="service_relay">输入中继服务器</string>
+  <string name="service_start_failed">%1$s启动失败</string>
+  <string name="service_restart_failed">%1$s重启失败</string>
+  <string name="servers_restarted">服务器已重启</string>
+  <string name="server_settings">服务器设置</string>
+  <string name="http_port">HTTP 端口</string>
+  <string name="signaling_port">信令端口</string>
+  <string name="relay_port">中继端口</string>
+  <string name="confirm">确定</string>
+  <string name="invalid_port">端口无效（1–65535）</string>
+  <string name="port_conflict">端口不能重复</string>
+  <string name="settings_saved">设置已保存</string>
 </resources>

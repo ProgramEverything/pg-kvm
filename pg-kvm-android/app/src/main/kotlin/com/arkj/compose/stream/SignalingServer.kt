@@ -37,10 +37,15 @@ import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.SessionDescription
 import org.webrtc.VideoTrack
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * WebSocket-based signaling server for WebRTC stream publishing.
@@ -55,6 +60,11 @@ import java.util.concurrent.ConcurrentHashMap
  * @author Created by claude on 2026/8/11
  */
 class SignalingServer {
+
+  private companion object {
+    /** 等待端口绑定完成的最长时间（秒） */
+    const val STARTUP_TIMEOUT_SECONDS = 5L
+  }
 
   private val logger by taggedLogger("SignalingServer")
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -107,11 +117,23 @@ class SignalingServer {
   /**
    * Starts the WebSocket signaling server.
    *
+   * Waits for the port bind to complete - java-websocket binds asynchronously on
+   * its selector thread, so a bind failure (e.g. port already in use) surfaces via
+   * [WebSocketServer.onError] with a null connection rather than as a thrown
+   * exception. We latch on both callbacks and rethrow the failure here.
+   *
    * @param port Listening port, default 3000 (matches the frontend [WS_URL]).
    * @return The WebSocket URL that browsers should connect to.
+   * @throws IOException if the server fails to bind the port within the timeout.
    */
   fun start(port: Int = 3000): String {
+    // 确保旧实例已释放端口
+    stop()
     serverPort = port
+
+    val startupLatch = CountDownLatch(1)
+    val bindError = AtomicReference<Exception?>(null)
+    val started = AtomicBoolean(false)
 
     webSocketServer = object : WebSocketServer(InetSocketAddress(port)) {
       override fun onOpen(conn: WebSocket, handshake: ClientHandshake) {
@@ -130,16 +152,35 @@ class SignalingServer {
       }
 
       override fun onError(conn: WebSocket?, ex: Exception) {
+        // conn == null 表示服务器级错误（端口绑定失败等），且 onStart 尚未回调
+        if (conn == null && !started.get()) {
+          bindError.set(ex)
+          startupLatch.countDown()
+        }
         logger.e { "[onError] conn=${conn?.remoteSocketAddress}, ${ex.message}" }
       }
 
       override fun onStart() {
+        started.set(true)
         logger.i { "[onStart] signaling server running on port $port" }
         _state.value = SignalingServerState.RUNNING
+        startupLatch.countDown()
       }
     }
 
     webSocketServer?.start()
+
+    // 等待端口绑定结果（成功或失败）
+    if (!startupLatch.await(STARTUP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+      stop()
+      throw IOException("signaling server startup timed out on port $port")
+    }
+    bindError.get()?.let { ex ->
+      stop()
+      _state.value = SignalingServerState.STOPPED
+      throw IOException("signaling server failed to bind port $port: ${ex.message}", ex)
+    }
+
     return "ws://${getLocalIpAddress()}:$port"
   }
 
@@ -159,7 +200,8 @@ class SignalingServer {
     _clientAddresses.value = emptyList()
 
     try {
-      webSocketServer?.stop()
+      // 等待 selector 线程退出并释放端口，否则快速重启会绑定失败
+      webSocketServer?.stop(2000)
     } catch (_: Exception) {
       // ignore
     }

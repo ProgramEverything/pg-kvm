@@ -10,8 +10,13 @@ import org.java_websocket.WebSocket
 import org.java_websocket.handshake.ClientHandshake
 import org.java_websocket.server.WebSocketServer
 import org.json.JSONObject
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * WebSocket server that receives keyboard/mouse input events from the browser
@@ -52,7 +57,18 @@ class InputRelayServer(
 
     // -------- Lifecycle --------
 
+    /**
+     * 启动输入中继服务器。阻塞等待端口绑定结果。
+     * @throws IOException 端口绑定失败或超时
+     */
     fun start(port: Int = DEFAULT_PORT): String {
+        // 确保旧实例已释放端口
+        stop()
+
+        val startupLatch = CountDownLatch(1)
+        val bindError = AtomicReference<Exception?>(null)
+        val started = AtomicBoolean(false)
+
         webSocketServer = object : WebSocketServer(InetSocketAddress(port)) {
             override fun onOpen(conn: WebSocket, handshake: ClientHandshake) {
                 Log.i(TAG, "Input client connected: ${conn.remoteSocketAddress}")
@@ -91,23 +107,42 @@ class InputRelayServer(
             }
 
             override fun onError(conn: WebSocket?, ex: Exception) {
+                // conn == null 表示服务器级错误（端口绑定失败等），且 onStart 尚未回调
+                if (conn == null && !started.get()) {
+                    bindError.set(ex)
+                    startupLatch.countDown()
+                }
                 Log.e(TAG, "WebSocket error: ${ex.message}")
             }
 
             override fun onStart() {
+                started.set(true)
                 Log.i(TAG, "Input relay server started on port $port")
                 _isRunning.value = true
+                startupLatch.countDown()
             }
         }
 
         webSocketServer?.start()
+
+        // 等待端口绑定结果（成功或失败）
+        if (!startupLatch.await(5, TimeUnit.SECONDS)) {
+            stop()
+            throw IOException("input relay server startup timed out on port $port")
+        }
+        bindError.get()?.let { ex ->
+            stop()
+            throw IOException("input relay server failed to bind port $port: ${ex.message}", ex)
+        }
+
         return "ws://${getLocalIpAddress()}:$port"
     }
 
     fun stop() {
         releaseAllKeys()
         try {
-            webSocketServer?.stop()
+            // 等待 selector 线程退出并释放端口，否则快速重启会绑定失败
+            webSocketServer?.stop(2000)
         } catch (_: Exception) {}
         webSocketServer = null
         _isRunning.value = false

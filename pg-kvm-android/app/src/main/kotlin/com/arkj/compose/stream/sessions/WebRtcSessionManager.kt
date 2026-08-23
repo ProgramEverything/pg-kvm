@@ -24,9 +24,28 @@ import com.arkj.compose.models.StreamInfo
 import com.arkj.compose.stream.SignalingServer
 import com.arkj.compose.stream.input.BleHelper
 import com.arkj.compose.stream.peer.StreamPeerConnectionFactory
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.webrtc.VideoTrack
 import java.util.UUID
+
+/** 串流相关的三个后台服务 */
+enum class StreamService { HTTP, SIGNALING, RELAY }
+
+/** 三个服务的监听端口配置 */
+data class ServerPorts(
+  val httpPort: Int,
+  val signalingPort: Int,
+  val relayPort: Int
+)
+
+/** 服务启动/重启结果事件（供 UI 弹 Toast） */
+data class ServerStartEvent(
+  /** 启动或重启失败的服务，空列表表示全部成功 */
+  val failures: List<StreamService>,
+  /** true 表示这是一次重启（成功时也提示） */
+  val isRestart: Boolean
+)
 
 interface WebRtcSessionManager {
 
@@ -89,11 +108,26 @@ interface WebRtcSessionManager {
   /** 切换当前摄像头的采集分辨率 */
   fun switchResolution(width: Int, height: Int, fps: Int)
 
-  /** 启动串流服务 (HTTP 服务器 + WebSocket 信令服务器) */
+  /** 启动串流服务 (HTTP 服务器 + WebSocket 信令服务器 + 输入中继服务器)；失败通过 [serverStartEvents] 报告 */
   fun startStreamServer()
 
   /** 停止串流服务 */
   fun stopStreamServer()
+
+  /** 重启全部三个服务；失败通过 [serverStartEvents] 报告 */
+  fun restartStreamServer()
+
+  /** 当前端口配置 */
+  fun getServerPorts(): ServerPorts
+
+  /**
+   * 更新端口配置（持久化）。若服务正在运行会自动用新端口重启，
+   * 失败通过 [serverStartEvents] 报告。
+   */
+  fun updateServerPorts(httpPort: Int, signalingPort: Int, relayPort: Int)
+
+  /** 服务启动/重启结果事件流（供 UI 弹 Toast） */
+  val serverStartEvents: SharedFlow<ServerStartEvent>
 
   /** 开启预览（根据当前 isCapturing/isConnected 状态自动处理重连/重启） */
   fun enablePreview(surface: Surface)
