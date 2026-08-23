@@ -43,4 +43,26 @@ public interface IFrameCallback {
 	 * @param frame this is direct ByteBuffer from JNI layer and you should handle it's byte order and limitation.
 	 */
 	public void onFrame(ByteBuffer frame);
+
+	/**
+	 * native 层实际调用的是本重载。
+	 *
+	 * frame 底层内存归 native 帧池所有：帧已"借出"，native 在本方法返回后
+	 * 也不会复用/释放这块内存，直到调用方通过 UVCCamera.nativeReleaseFrame(framePtr)
+	 * 归还帧池。因此可以零拷贝地把 frame 包装后交给异步消费者，消费完成后
+	 * （或提前放弃时）必须调用 nativeReleaseFrame(framePtr)。
+	 *
+	 * 默认实现保持旧行为：同步处理完立即归还帧，此时 frame 仅在本方法
+	 * 返回前有效，实现方应在本方法内完成数据拷贝。
+	 *
+	 * @param frame 底层为 native 帧池内存的 direct ByteBuffer
+	 * @param framePtr 帧句柄，用于归还帧池
+	 */
+	public default void onFrame(ByteBuffer frame, long framePtr) {
+		try {
+			onFrame(frame);
+		} finally {
+			UVCCamera.nativeReleaseFrame(framePtr);
+		}
+	}
 }

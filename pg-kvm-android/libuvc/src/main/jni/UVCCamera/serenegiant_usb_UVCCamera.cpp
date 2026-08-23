@@ -38,6 +38,7 @@
 
 #include "libUVCCamera.h"
 #include "UVCCamera.h"
+#include "UVCPreview.h"
 
 /**
  * set the value into the long field
@@ -273,6 +274,16 @@ static jint nativeSetFrameCallback(JNIEnv *env, jobject thiz,
 		jobject frame_callback_obj = env->NewGlobalRef(jIFrameCallback);
 		result = camera->setFrameCallback(env, frame_callback_obj, pixel_format);
 	}
+	RETURN(result, jint);
+}
+
+// Java 侧用完借出的回调帧后，归还给所属 UVCPreview 的帧池
+static jint nativeReleaseFrame(JNIEnv *env, jobject thiz,
+	jlong frame_ptr) {
+
+	jint result = JNI_ERR;
+	ENTER();
+	result = (jint) UVCPreview::releaseCallbackFrame(reinterpret_cast<void *>(frame_ptr));
 	RETURN(result, jint);
 }
 
@@ -2041,6 +2052,7 @@ static JNINativeMethod methods[] = {
 	{ "nativeStopPreview",				"(J)I", (void *) nativeStopPreview },
 	{ "nativeSetPreviewDisplay",		"(JLandroid/view/Surface;)I", (void *) nativeSetPreviewDisplay },
 	{ "nativeSetFrameCallback",			"(JLcom/jiangdg/uvc/IFrameCallback;I)I", (void *) nativeSetFrameCallback },
+	{ "nativeReleaseFrame",				"(J)I", (void *) nativeReleaseFrame },
 
 	{ "nativeSetCaptureDisplay",		"(JLandroid/view/Surface;)I", (void *) nativeSetCaptureDisplay },
 

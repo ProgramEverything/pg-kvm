@@ -93,6 +93,8 @@ private:
 	void recycle_frame(uvc_frame_t *frame);
 	void init_pool(size_t data_bytes);
 	void clear_pool();
+	// 借出的回调帧登记进全局表，交给 Java 后不再立即归还帧池
+	void checkoutCallbackFrame(uvc_frame_t *frame);
 //
 	void clearDisplay();
 	static void uvc_preview_frame_callback(uvc_frame_t *frame, void *vptr_args);
@@ -125,6 +127,8 @@ public:
 	int stopPreview();
 	inline const bool isCapturing() const;
 	int setCaptureDisplay(ANativeWindow *capture_window);
+	// Java 侧用完回调帧后归还帧池（找不到所属实例时直接释放）
+	static int releaseCallbackFrame(void *frame_ptr);
 };
 
 #endif /* UVCPREVIEW_H_ */

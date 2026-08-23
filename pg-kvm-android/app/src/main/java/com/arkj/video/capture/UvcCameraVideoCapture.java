@@ -305,7 +305,13 @@ public class UvcCameraVideoCapture implements VideoCapturer {
   private final IFrameCallback frameCallback = new IFrameCallback() {
     @Override
     public void onFrame(ByteBuffer frame) {
-      if (!isRunning || capturerObserver == null) {
+      // native 层调用的是带 framePtr 的重载，这里不会被调用到
+    }
+
+    @Override
+    public void onFrame(ByteBuffer frame, long framePtr) {
+      if (!isRunning || capturerObserver == null || frame == null) {
+        UVCCamera.nativeReleaseFrame(framePtr);
         return;
       }
 
@@ -313,12 +319,14 @@ public class UvcCameraVideoCapture implements VideoCapturer {
       final int w = width;
       final int h = height;
       final int expectedSize = w * h * 3 / 2;
-      if (frame == null || frame.remaining() < expectedSize) {
+      if (frame.remaining() < expectedSize) {
+        UVCCamera.nativeReleaseFrame(framePtr);
         return;
       }
 
-
-      // 分配 I420 buffer
+      // 零拷贝包装：帧内存已从 native 帧池"借出"，在归还前 native 不会
+      // 复用或释放这块内存。WebRTC 用完（refcount 归零）后通过 releaseCallback
+      // 归还帧池；所有提前退出的路径也必须归还，否则帧池会被耗尽。
       frame.position(0);
       ByteBuffer yPlane = frame.slice();
       yPlane.limit(w * h);
@@ -331,22 +339,33 @@ public class UvcCameraVideoCapture implements VideoCapturer {
       ByteBuffer vPlane = frame.slice();
       vPlane.limit(w * h / 4);
 
-      JavaI420Buffer i420 = JavaI420Buffer.wrap(
-        w,
-        h,
-        yPlane,
-        w,
-        uPlane,
-        w / 2,
-        vPlane,
-        w / 2,
-        null
-      );
-
-      long timestampNs = System.nanoTime();
-      VideoFrame videoFrame = new VideoFrame(i420, rotation, timestampNs);
-      capturerObserver.onFrameCaptured(videoFrame);
-      videoFrame.release();
+      JavaI420Buffer i420 = null;
+      VideoFrame videoFrame = null;
+      try {
+        i420 = JavaI420Buffer.wrap(
+            w,
+            h,
+            yPlane,
+            w,
+            uPlane,
+            w / 2,
+            vPlane,
+            w / 2,
+            () -> UVCCamera.nativeReleaseFrame(framePtr));
+        videoFrame = new VideoFrame(i420, rotation, System.nanoTime());
+        capturerObserver.onFrameCaptured(videoFrame);
+      } catch (Exception e) {
+        Log.e(TAG, "onFrame error", e);
+      } finally {
+        if (videoFrame != null) {
+          // 平衡 new VideoFrame 的引用；若 observer 未持有，此处触发 releaseCallback
+          videoFrame.release();
+        } else if (i420 != null) {
+          i420.release();
+        } else {
+          UVCCamera.nativeReleaseFrame(framePtr);
+        }
+      }
     }
   };
 

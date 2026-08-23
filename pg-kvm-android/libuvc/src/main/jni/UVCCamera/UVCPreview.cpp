@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <linux/time.h>
 #include <unistd.h>
+#include <map>
 
 #if 1	// set 1 if you don't need debug log
 	#ifndef LOG_NDEBUG
@@ -48,6 +49,14 @@
 
 struct timespec ts;
 struct timeval tv;
+
+// 全局"借出帧"登记表：交给 Java 的回调帧在此登记，
+// Java 用完后通过 nativeReleaseFrame 查表归还所属 UVCPreview 的帧池。
+// 所属实例析构时仅摘除登记（Java 可能还在读，帧由后续释放路径直接 free）。
+// g_checkout_mutex 保护本表，且释放路径在持锁期间完成归还，
+// 借此与析构函数互斥，避免归还时访问已销毁的实例。
+static pthread_mutex_t g_checkout_mutex = PTHREAD_MUTEX_INITIALIZER;
+static std::map<void *, UVCPreview *> g_checkout_frames;
 
 UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 :	mPreviewWindow(NULL),
@@ -88,6 +97,18 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 UVCPreview::~UVCPreview() {
 
 	ENTER();
+	// 摘除本实例借出的帧。不释放它们（Java 侧可能还在读），
+	// 后续 nativeReleaseFrame 查不到归属时直接 uvc_free_frame。
+	pthread_mutex_lock(&g_checkout_mutex);
+	std::map<void *, UVCPreview *>::iterator it = g_checkout_frames.begin();
+	while (it != g_checkout_frames.end()) {
+		if (it->second == this) {
+			g_checkout_frames.erase(it++);
+		} else {
+			++it;
+		}
+	}
+	pthread_mutex_unlock(&g_checkout_mutex);
 	if (mPreviewWindow)
 		ANativeWindow_release(mPreviewWindow);
 	mPreviewWindow = NULL;
@@ -119,8 +140,18 @@ uvc_frame_t *UVCPreview::get_frame(size_t data_bytes) {
 	uvc_frame_t *frame = NULL;
 	pthread_mutex_lock(&pool_mutex);
 	{
-		if (!mFramePool.isEmpty()) {
-			frame = mFramePool.last();
+		// 池内帧大小可能不一致（预览/回调尺寸不同、分辨率切换后的旧帧），
+		// 从池尾向前找容量足够的帧，避免向小帧写入越界
+		for (int i = mFramePool.size() - 1; i >= 0; i--) {
+			if (mFramePool[i]->data_bytes >= data_bytes) {
+				frame = mFramePool.remove(i);
+				break;
+			}
+		}
+		if (!frame && !mFramePool.isEmpty()) {
+			// 没有容量足够的帧：丢弃池尾的小帧，给即将分配的新帧腾出池位，
+			// 避免池被无用小帧占满后陷入"分配-释放"循环
+			uvc_free_frame(mFramePool.last());
 		}
 	}
 	pthread_mutex_unlock(&pool_mutex);
@@ -129,6 +160,38 @@ uvc_frame_t *UVCPreview::get_frame(size_t data_bytes) {
 		frame = uvc_allocate_frame(data_bytes);
 	}
 	return frame;
+}
+
+// static
+int UVCPreview::releaseCallbackFrame(void *frame_ptr) {
+	ENTER();
+	uvc_frame_t *frame = reinterpret_cast<uvc_frame_t *>(frame_ptr);
+	UVCPreview *preview = NULL;
+	pthread_mutex_lock(&g_checkout_mutex);
+	{
+		std::map<void *, UVCPreview *>::iterator it = g_checkout_frames.find(frame_ptr);
+		if (it != g_checkout_frames.end()) {
+			preview = it->second;
+			g_checkout_frames.erase(it);
+			if (LIKELY(preview)) {
+				// 仍持有 g_checkout_mutex 时归还，与析构函数的登记表清理互斥，
+				// 保证这里访问的 preview 一定还活着
+				preview->recycle_frame(frame);
+			}
+		}
+	}
+	pthread_mutex_unlock(&g_checkout_mutex);
+	if (UNLIKELY(!preview)) {
+		// 所属实例已销毁（登记表中被摘除），直接释放
+		uvc_free_frame(frame);
+	}
+	RETURN(0, int);
+}
+
+void UVCPreview::checkoutCallbackFrame(uvc_frame_t *frame) {
+	pthread_mutex_lock(&g_checkout_mutex);
+	g_checkout_frames[frame] = this;
+	pthread_mutex_unlock(&g_checkout_mutex);
 }
 
 void UVCPreview::recycle_frame(uvc_frame_t *frame) {
@@ -238,7 +301,7 @@ int UVCPreview::setFrameCallback(JNIEnv *env, jobject frame_callback_obj, int pi
 				jclass clazz = env->GetObjectClass(frame_callback_obj);
 				if (LIKELY(clazz)) {
 					iframecallback_fields.onFrame = env->GetMethodID(clazz,
-						"onFrame",	"(Ljava/nio/ByteBuffer;)V");
+						"onFrame",	"(Ljava/nio/ByteBuffer;J)V");
 				} else {
 					LOGW("failed to get object class");
 				}
@@ -895,6 +958,7 @@ void UVCPreview::do_capture_callback(JNIEnv *env, uvc_frame_t *frame) {
 
 	if (LIKELY(frame)) {
 		uvc_frame_t *callback_frame = frame;
+		bool handed_off = false;
 		if (mFrameCallbackObj) {
 			if (mFrameCallbackFunc) {
 				callback_frame = get_frame(callbackPixelBytes);
@@ -911,15 +975,26 @@ void UVCPreview::do_capture_callback(JNIEnv *env, uvc_frame_t *frame) {
 					goto SKIP;
 				}
 			}
-			jobject buf = env->NewDirectByteBuffer(callback_frame->data, callbackPixelBytes);
-			if (iframecallback_fields.onFrame) {
-				env->CallVoidMethod(mFrameCallbackObj, iframecallback_fields.onFrame, buf);
+			if (LIKELY(iframecallback_fields.onFrame)) {
+				jobject buf = env->NewDirectByteBuffer(callback_frame->data, callbackPixelBytes);
+				if (LIKELY(buf)) {
+					// 借出：帧登记后交给 Java，不在这里归还帧池。
+					// Java 侧用完（WebRTC 异步处理结束）后通过
+					// nativeReleaseFrame -> releaseCallbackFrame 归还，
+					// 在此期间 native 不会复用或释放这块内存
+					checkoutCallbackFrame(callback_frame);
+					env->CallVoidMethod(mFrameCallbackObj, iframecallback_fields.onFrame,
+						buf, (jlong) (intptr_t) callback_frame);
+					env->ExceptionClear();
+					env->DeleteLocalRef(buf);
+					handed_off = true;
+				}
 			}
-			env->ExceptionClear();
-			env->DeleteLocalRef(buf);
 		}
  SKIP:
-		recycle_frame(callback_frame);
+		if (UNLIKELY(!handed_off)) {
+			recycle_frame(callback_frame);
+		}
 	}
 	EXIT();
 }

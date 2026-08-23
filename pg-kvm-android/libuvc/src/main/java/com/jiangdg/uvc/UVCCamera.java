@@ -1095,6 +1095,8 @@ public class UVCCamera {
 	private static final native int nativeStopPreview(final long id_camera);
 	private static final native int nativeSetPreviewDisplay(final long id_camera, final Surface surface);
 	private static final native int nativeSetFrameCallback(final long mNativePtr, final IFrameCallback callback, final int pixelFormat);
+	// 归还借出的回调帧（配合 IFrameCallback#onFrame(ByteBuffer, long) 使用）
+	public static final native int nativeReleaseFrame(final long framePtr);
 
 //**********************************************************************
 	/**
