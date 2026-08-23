@@ -27,6 +27,7 @@
 
 #include "libUVCCamera.h"
 #include <pthread.h>
+#include <map>
 #include <android/native_window.h>
 #include "objectarray.h"
 
@@ -89,6 +90,12 @@ private:
 // improve performance by reducing memory allocation
 	pthread_mutex_t pool_mutex;
 	ObjectArray<uvc_frame_t *> mFramePool;
+	// 预览线程在 prepare_preview 中写入，捕获线程/Java 归还路径读取，
+	// stopPreview 会先 join 线程再允许重启，volatile 保证可见性即可
+	volatile size_t mPoolFrameBytes;
+	// 各帧（含借出给 Java 的帧）的实际分配容量，key 为帧指针。
+	// data_bytes 会被下游转换函数改写，不能作为容量判断依据
+	std::map<uvc_frame_t *, size_t> mFrameCapacity;
 	uvc_frame_t *get_frame(size_t data_bytes);
 	void recycle_frame(uvc_frame_t *frame);
 	void init_pool(size_t data_bytes);

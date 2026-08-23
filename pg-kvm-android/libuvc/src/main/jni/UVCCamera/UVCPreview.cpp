@@ -79,7 +79,8 @@ UVCPreview::UVCPreview(uvc_device_handle_t *devh)
 	captureQueu(NULL),
 	mFrameCallbackObj(NULL),
 	mFrameCallbackFunc(NULL),
-	callbackPixelBytes(2) {
+	callbackPixelBytes(2),
+	mPoolFrameBytes(0) {
 
 	ENTER();
 	pthread_cond_init(&preview_sync, NULL);
@@ -132,33 +133,45 @@ UVCPreview::~UVCPreview() {
 
 /**
  * get uvc_frame_t from frame pool
- * if pool is empty, create new frame
- * this function does not confirm the frame size
- * and you may need to confirm the size
+ * 池内帧统一按 mPoolFrameBytes 容量分配，任意帧都能满足任意链路的请求，
+ * 直接出队即可；只有分辨率切换后归还的旧小帧需要淘汰重分配。
+ * 出队帧的 data_bytes 会被重置为本次请求大小，供下游按需读写。
  */
 uvc_frame_t *UVCPreview::get_frame(size_t data_bytes) {
 	uvc_frame_t *frame = NULL;
+	size_t capacity = 0;
 	pthread_mutex_lock(&pool_mutex);
 	{
-		// 池内帧大小可能不一致（预览/回调尺寸不同、分辨率切换后的旧帧），
-		// 从池尾向前找容量足够的帧，避免向小帧写入越界
-		for (int i = mFramePool.size() - 1; i >= 0; i--) {
-			if (mFramePool[i]->data_bytes >= data_bytes) {
-				frame = mFramePool.remove(i);
-				break;
+		while (!frame && !mFramePool.isEmpty()) {
+			uvc_frame_t *f = mFramePool.remove(mFramePool.size() - 1);
+			std::map<uvc_frame_t *, size_t>::iterator it = mFrameCapacity.find(f);
+			const size_t cap = (it != mFrameCapacity.end()) ? it->second : 0;
+			if (cap >= data_bytes) {
+				frame = f;
+				capacity = cap;
+			} else {
+				// 分辨率切换前分配的旧小帧，直接淘汰
+				if (it != mFrameCapacity.end()) {
+					mFrameCapacity.erase(it);
+				}
+				uvc_free_frame(f);
 			}
-		}
-        LOGW("Frame pool size: %d", mFramePool.size());
-		if (!frame && !mFramePool.isEmpty()) {
-			// 没有容量足够的帧：丢弃池尾的小帧，给即将分配的新帧腾出池位，
-			// 避免池被无用小帧占满后陷入"分配-释放"循环
-			uvc_free_frame(mFramePool.last());
 		}
 	}
 	pthread_mutex_unlock(&pool_mutex);
-	if UNLIKELY(!frame) {
-		LOGW("allocate new frame");
-		frame = uvc_allocate_frame(data_bytes);
+	if (UNLIKELY(!frame)) {
+		// 池空：按统一容量分配（未初始化或单次请求超容量时取两者较大值）
+		capacity = mPoolFrameBytes ? (mPoolFrameBytes > data_bytes ? mPoolFrameBytes : data_bytes) : data_bytes;
+		LOGW("allocate new frame:%zu", capacity);
+		frame = uvc_allocate_frame(capacity);
+		if (LIKELY(frame)) {
+			pthread_mutex_lock(&pool_mutex);
+			mFrameCapacity[frame] = capacity;
+			pthread_mutex_unlock(&pool_mutex);
+		}
+	}
+	if (LIKELY(frame)) {
+		frame->data_bytes = data_bytes;
 	}
 	return frame;
 }
@@ -196,13 +209,24 @@ void UVCPreview::checkoutCallbackFrame(uvc_frame_t *frame) {
 }
 
 void UVCPreview::recycle_frame(uvc_frame_t *frame) {
+	if (UNLIKELY(!frame)) return;
+
+	bool keep = false;
 	pthread_mutex_lock(&pool_mutex);
-	if (LIKELY(mFramePool.size() < FRAME_POOL_SZ)) {
-		mFramePool.put(frame);
-		frame = NULL;
+	{
+		std::map<uvc_frame_t *, size_t>::iterator it = mFrameCapacity.find(frame);
+		const size_t cap = (it != mFrameCapacity.end()) ? it->second : 0;
+		// 容量达到当前统一容量的帧才回收复用；
+		// 分辨率切换后归还的旧小帧不入池，避免下次出队时反复淘汰
+		if ((cap >= mPoolFrameBytes) && (mFramePool.size() < FRAME_POOL_SZ)) {
+			mFramePool.put(frame);
+			keep = true;
+		} else if (it != mFrameCapacity.end()) {
+			mFrameCapacity.erase(it);
+		}
 	}
 	pthread_mutex_unlock(&pool_mutex);
-	if (UNLIKELY(frame)) {
+	if (UNLIKELY(!keep)) {
 		uvc_free_frame(frame);
 	}
 }
@@ -215,7 +239,11 @@ void UVCPreview::init_pool(size_t data_bytes) {
 	pthread_mutex_lock(&pool_mutex);
 	{
 		for (int i = 0; i < FRAME_POOL_SZ; i++) {
-			mFramePool.put(uvc_allocate_frame(data_bytes));
+			uvc_frame_t *frame = uvc_allocate_frame(data_bytes);
+			if (LIKELY(frame)) {
+				mFramePool.put(frame);
+				mFrameCapacity[frame] = data_bytes;
+			}
 		}
 	}
 	pthread_mutex_unlock(&pool_mutex);
@@ -230,6 +258,7 @@ void UVCPreview::clear_pool() {
 	{
 		const int n = mFramePool.size();
 		for (int i = 0; i < n; i++) {
+			mFrameCapacity.erase(mFramePool[i]);
 			uvc_free_frame(mFramePool[i]);
 		}
 		mFramePool.clear();
@@ -589,6 +618,18 @@ int UVCPreview::prepare_preview(uvc_stream_ctrl_t *ctrl) {
 		frameMode = requestMode;
 		frameBytes = frameWidth * frameHeight * (!requestMode ? 2 : 4);
 		previewBytes = frameWidth * frameHeight * PREVIEW_PIXEL_BYTES;
+		// 帧池统一容量 = 各链路所需帧大小的最大值（源帧/预览 RGBX/回调帧），
+		// 池内帧按此容量分配，消除不同用途帧大小不一致导致的反复释放重建。
+		// 容量变化时清空池中旧帧，借出中的旧帧在归还时（recycle_frame）被淘汰
+		size_t poolBytes = frameBytes > previewBytes ? frameBytes : previewBytes;
+		if (callbackPixelBytes > poolBytes) {
+			poolBytes = callbackPixelBytes;
+		}
+		if (poolBytes != mPoolFrameBytes) {
+			LOGI("frame pool capacity:%zu->%zu", mPoolFrameBytes, poolBytes);
+			mPoolFrameBytes = poolBytes;
+			clear_pool();
+		}
 	} else {
 		LOGE("could not negotiate with camera:err=%d", result);
 	}
