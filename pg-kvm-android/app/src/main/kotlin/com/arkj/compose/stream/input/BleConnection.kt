@@ -9,12 +9,16 @@ import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import io.getstream.webrtc.sample.compose.R
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 单个摄像头的 BLE 连接（per-session，类比 UvcCameraVideoCapture 持有 ctrlBlock/uvcCamera）。
@@ -54,14 +58,37 @@ class BleConnection(
         private const val CMD_MOUSE_CLICK: Byte = 0x12
         private const val CMD_MOUSE_BUTTON_DOWN: Byte = 0x13
         private const val CMD_MOUSE_BUTTON_UP: Byte = 0x14
+
+        // 写队列上限：超过后优先丢弃旧的鼠标移动包（按键类事件不丢）
+        private const val MAX_QUEUE_SIZE = 128
+        // 单包最大写重试次数，超过后丢弃该包，避免队头阻塞
+        private const val MAX_WRITE_RETRIES = 5
+        private const val WRITE_RETRY_DELAY_MS = 4L
     }
 
     /** 连接意外断开时的回调（主动 disconnect 不触发），由上层决定是否重连 */
     var onUnexpectedDisconnect: (() -> Unit)? = null
 
     private var bluetoothGatt: BluetoothGatt? = null
-    private var writeCharacteristic: BluetoothGattCharacteristic? = null
+    @Volatile private var writeCharacteristic: BluetoothGattCharacteristic? = null
     private var mtu: Int = 23 // default BLE MTU
+
+    // MARK: - Write queue (串行化所有 GATT 写，写失败有限重试)
+
+    /**
+     * droppable = true 的包（鼠标移动/滚轮）在队列超限时优先被丢弃；
+     * 按键类事件（keydown/keyup 等）保序排队，不主动丢弃。
+     */
+    private class QueuedPacket(val data: ByteArray, val droppable: Boolean)
+
+    private val writeQueue = ConcurrentLinkedQueue<QueuedPacket>()
+    private val writeExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "BleWrite")
+    }
+    /** executor 上是否已有 drain 循环在跑 */
+    private val pumping = AtomicBoolean(false)
+    // 以下状态主要在 writeExecutor 线程访问，clearWriteQueue 可能从 GATT 回调线程写
+    @Volatile private var retryCount = 0
 
     // Connection state
     private val _statusText = MutableStateFlow(context.getString(R.string.ble_status_disconnected))
@@ -73,8 +100,9 @@ class BleConnection(
     private val _connectedDeviceName = MutableStateFlow<String?>(null)
     val connectedDeviceName: StateFlow<String?> = _connectedDeviceName.asStateFlow()
 
-    // Deduplication state
+    // Deduplication state（可能被多个回调线程访问，读写需持锁）
     private var lastSentModifiersMask: UByte = 0x00u
+    private val modifiersLock = Any()
 
     val deviceAddress: String get() = device.address
 
@@ -98,6 +126,7 @@ class BleConnection(
         } catch (_: SecurityException) {}
         bluetoothGatt = null
         writeCharacteristic = null
+        clearWriteQueue()
         _isReady.value = false
         _connectedDeviceName.value = null
         _statusText.value = context.getString(R.string.ble_status_disconnected)
@@ -106,16 +135,22 @@ class BleConnection(
     // MARK: - Public API: Keyboard HID
 
     fun setModifiers(mask: UByte) {
-        if (mask == lastSentModifiersMask) return
-        lastSentModifiersMask = mask
+        synchronized(modifiersLock) {
+            if (mask == lastSentModifiersMask) return
+            lastSentModifiersMask = mask
+        }
         sendFrame(CMD_SET_MODIFIERS, byteArrayOf(mask.toByte()))
     }
 
     fun sendKeyDown(modifiersMask: UByte, keycode: UByte) {
         if (keycode == 0x00u.toUByte()) return
         // Sync modifiers first if needed
-        if (modifiersMask != lastSentModifiersMask) {
-            lastSentModifiersMask = modifiersMask
+        val needModifiers: Boolean
+        synchronized(modifiersLock) {
+            needModifiers = modifiersMask != lastSentModifiersMask
+            if (needModifiers) lastSentModifiersMask = modifiersMask
+        }
+        if (needModifiers) {
             sendFrame(CMD_SET_MODIFIERS, byteArrayOf(modifiersMask.toByte()))
         }
         sendFrame(CMD_KEY_DOWN, byteArrayOf(keycode.toByte()))
@@ -185,6 +220,7 @@ class BleConnection(
                     _isReady.value = false
                     _connectedDeviceName.value = null
                     writeCharacteristic = null
+                    clearWriteQueue() // 陈旧的位移/按键事件对端已无意义，全部丢弃
                     try {
                         gatt.close()
                     } catch (_: SecurityException) {}
@@ -234,6 +270,7 @@ class BleConnection(
             _isReady.value = true
             _connectedDeviceName.value = gatt.device.name ?: gatt.device.address
             _statusText.value = context.getString(R.string.ble_status_connected, _connectedDeviceName.value ?: "")
+            pumpWrites() // 连接就绪，唤醒可能在等待的队列
             Log.d(TAG, "BLE connection ready!")
         }
     }
@@ -255,7 +292,9 @@ class BleConnection(
     private fun sendFrame(cmd: Byte, payload: ByteArray) {
         val frame = buildFrame(cmd, payload)
         val packet = buildPacket(listOf(frame))
-        writePacket(packet)
+        // 鼠标移动/滚轮是高频且可丢帧的事件
+        val droppable = cmd == CMD_MOUSE_MOVE || cmd == CMD_MOUSE_SCROLL
+        enqueuePacket(packet, droppable)
     }
 
     private fun buildPacket(frames: List<ByteArray>): ByteArray {
@@ -283,7 +322,7 @@ class BleConnection(
 
         for (frame in frames) {
             if (batchSize + frame.size > maxSize && batch.isNotEmpty()) {
-                writePacket(buildPacket(batch))
+                enqueuePacket(buildPacket(batch), droppable = false)
                 batch = mutableListOf()
                 batchSize = 0
             }
@@ -292,24 +331,77 @@ class BleConnection(
         }
 
         if (batch.isNotEmpty()) {
-            writePacket(buildPacket(batch))
+            enqueuePacket(buildPacket(batch), droppable = false)
+        }
+    }
+
+    // MARK: - Private: Write queue
+
+    /** 入队并启动 drain 循环，非阻塞，任何线程可调用 */
+    private fun enqueuePacket(packet: ByteArray, droppable: Boolean) {
+        // 队列超限时丢旧的 droppable 包（旧位移），给按键事件腾出空间
+        while (writeQueue.size >= MAX_QUEUE_SIZE) {
+            val victim = writeQueue.firstOrNull { it.droppable } ?: return // 全是按键事件，丢新包
+            writeQueue.remove(victim)
+        }
+        writeQueue.add(QueuedPacket(packet, droppable))
+        pumpWrites()
+    }
+
+    /**
+     * 串行 drain：peek 队头包 -> 写成功才 poll 出队；
+     * 写失败有限重试（带短退避），超过上限丢弃该包，避免队头阻塞。
+     */
+    private fun pumpWrites() {
+        if (!pumping.compareAndSet(false, true)) return
+        writeExecutor.execute {
+            try {
+                while (true) {
+                    val entry = writeQueue.peek() ?: break
+                    if (writeCharacteristic == null) break // 未就绪，留在队列头等重连/就绪
+                    if (tryWrite(entry.data)) {
+                        writeQueue.poll()
+                        retryCount = 0
+                        continue
+                    }
+                    retryCount++
+                    if (retryCount >= MAX_WRITE_RETRIES) {
+                        writeQueue.poll()
+                        retryCount = 0
+                        Log.w(TAG, "Dropping packet after $MAX_WRITE_RETRIES failed write attempts")
+                        continue
+                    }
+                    SystemClock.sleep(WRITE_RETRY_DELAY_MS)
+                }
+            } finally {
+                pumping.set(false)
+                // 与 enqueue 竞态兜底：退出前又有新包入队则再驱动一轮
+                if (writeQueue.isNotEmpty() && writeCharacteristic != null) pumpWrites()
+            }
         }
     }
 
     @Suppress("DEPRECATION")
-    private fun writePacket(packet: ByteArray) {
-        val characteristic = writeCharacteristic ?: return
-        try {
+    private fun tryWrite(packet: ByteArray): Boolean {
+        val gatt = bluetoothGatt ?: return false
+        val characteristic = writeCharacteristic ?: return false
+        return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                bluetoothGatt?.writeCharacteristic(
+                gatt.writeCharacteristic(
                     characteristic, packet, characteristic.writeType
-                )
+                ) == android.bluetooth.BluetoothStatusCodes.SUCCESS
             } else {
                 characteristic.value = packet
-                bluetoothGatt?.writeCharacteristic(characteristic)
+                gatt.writeCharacteristic(characteristic)
             }
         } catch (e: SecurityException) {
             Log.e(TAG, "Write failed: ${e.message}")
+            false
         }
+    }
+
+    private fun clearWriteQueue() {
+        writeQueue.clear()
+        retryCount = 0
     }
 }
