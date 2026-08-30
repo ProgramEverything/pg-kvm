@@ -16,7 +16,7 @@ dependencyResolutionManagement {
         maven(url = "https://plugins.gradle.org/m2/")
     }
 }
-rootProject.name = "webrtc-sample-compose"
+rootProject.name = "pg-kvm-android"
 include(":app")
 include(":libausbc")
 include(":libuvc")

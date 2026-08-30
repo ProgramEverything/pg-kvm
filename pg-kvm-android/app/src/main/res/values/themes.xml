@@ -17,6 +17,6 @@
 <resources>
 
     <style name="Theme.WebrtcSampleCompose" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:statusBarColor">@color/black</item>
+        <item name="android:statusBarColor">#FF337EFF</item>
     </style>
 </resources>
